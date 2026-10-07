@@ -27,7 +27,7 @@ Record:
 - current branch and HEAD
 - default branch when available
 - total tracked Markdown files
-- whether `drift.lock` exists
+- root and tracked nested `drift.lock` paths and their scope directories
 - Drift version
 
 Inventory tracked documentation with Git rather than `find` so generated,
@@ -40,6 +40,7 @@ git rev-parse --show-toplevel
 git branch --show-current
 git rev-parse HEAD
 git ls-files '*.md' '*.mdx'
+git ls-files -z -- 'drift.lock' '**/drift.lock'
 drift --version
 ```
 
@@ -49,21 +50,39 @@ repo itself treats them as documentation.
 Do not start from changed files. The entire tracked documentation estate is in
 scope.
 
+Before deterministic checks, build a scope inventory containing the repository
+root (even without a root lockfile) and the directory of every tracked nested
+`drift.lock`, at every depth. Consume the NUL-delimited lockfile list safely.
+Assign each tracked doc to its nearest enclosing lockfile scope, or the root
+when none exists. Record expected doc paths per scope; a parent check skips
+Markdown discovery beneath nested lockfiles and cannot cover those scopes.
+
 ## 2. Run deterministic Drift coverage first
 
-Run the full repository check:
+Run both commands from the root and then from **each** inventoried nested scope
+directory, without `--changed`. Use a subshell or explicit working directory so
+each command resolves that scope's lockfile:
 
 ```bash
 drift check --format json
+drift status --format json
 ```
 
-If JSON is unavailable or unsuitable, fall back to:
+If JSON is unavailable or unsuitable, fall back in that same scope to:
 
 ```bash
 drift check
+drift status
 ```
 
-Record:
+Retain each scope's working directory, stdout/stderr, both exit codes, and
+whether each result is complete and usable. Continue to the remaining scopes
+after a failure. A check exit of 1 with a complete stale/broken report is a
+finding, not an unexecuted scope; command errors or truncated output leave a
+coverage gap. A tracked lockfile missing from the checkout is also a gap; do
+not silently treat a fallback to its parent lockfile as checking that scope.
+
+Record per scope and aggregate:
 
 - total docs checked
 - fresh docs
@@ -74,13 +93,23 @@ Record:
 - missing files or symbols
 - baseline/fingerprint failures
 
-Also inspect:
+Use `status` only for binding coverage; it does not check staleness. Normalize
+reported doc paths relative to each scope back to repository-relative paths,
+then reconcile against the tracked documentation inventory. Count unique
+checked paths, not tracked-doc totals or a blind sum of scope totals; retain
+scope-specific findings when bindings mention the same doc in multiple scopes.
+Keep untracked results separate, and list skipped or unreported tracked docs
+(including unsupported formats) explicitly. Investigate unexpected omissions,
+including untracked lockfiles that may create additional scope boundaries.
 
-```bash
-drift status --format json
-```
-
-when available, to understand binding coverage.
+Report repository-wide deterministic verification as `full` only when every
+scope has usable check and status results, every tracked doc is accounted for
+as checked in its owning scope, and no verification gaps or skipped bindings
+remain. A scope's `verification_state: full` applies only to its discovered
+work, not to the whole repository. If any scope is omitted, inaccessible, or
+incompletely inspected, report `partial` (or `unavailable` if nothing could be
+verified), name the affected scopes/docs and reasons, and use the
+`Audit incomplete` verdict. Do not shrink the denominator to completed scopes.
 
 Important: a clean `drift check` proves only that configured fingerprints,
 targets, and checked Markdown links are fresh. It does **not** prove that prose
@@ -303,10 +332,13 @@ Reference: 95
 Historical/archive: 1102
 
 Drift:
-  checked: 1324
+  scopes completed (check + status): 3/4
+  unchecked scope: packages/example (command unavailable)
+  checked tracked docs (unique): 1300/1324
+  unchecked tracked docs: 24
   stale: 0
   broken: 0
-  verification: full
+  verification: partial
 
 Semantic coverage:
   current/normative reviewed: 42/42
