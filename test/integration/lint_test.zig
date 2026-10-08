@@ -787,6 +787,52 @@ test "check --format json reports broken links and heading anchors" {
     try std.testing.expectEqualStrings("link_target_not_found", overview.links[1].reason.?.code);
 }
 
+test "check --format json preserves Markdown link targets across docs" {
+    const allocator = std.testing.allocator;
+    var repo = try helpers.TempRepo.init(allocator);
+    defer repo.cleanup();
+
+    const targets = [_][]const u8{
+        "../assets/example.txt",
+        "./reference.md#Details",
+        "missing-long-target-name.md#Missing",
+    };
+    try repo.writeFile("assets/example.txt", "Example\n");
+    try repo.writeFile("docs/reference.md", "# Reference\n\n## Details\n");
+    const doc_paths = [_][]const u8{ "docs/first.md", "docs/second.md" };
+    for (doc_paths) |doc_path| {
+        try repo.writeFile(doc_path, "# Links\n\n" ++
+            "[asset](../assets/example.txt)\n" ++
+            "[section](./reference.md#Details)\n" ++
+            "[missing](missing-long-target-name.md#Missing)\n");
+    }
+    try repo.commit("add docs with distinct link targets");
+
+    const result = try repo.runDrift(&.{ "check", "--format", "json" });
+    defer result.deinit(allocator);
+    try helpers.expectExitCode(result.term, 1);
+    try helpers.validateDriftCheckJson(allocator, result.stdout);
+
+    const parsed = try std.json.parseFromSlice(@import("payload").DriftCheckV1, allocator, result.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 6), parsed.value.summary.links_total);
+    try std.testing.expectEqual(@as(u32, 2), parsed.value.summary.links_broken);
+    for (doc_paths) |doc_path| {
+        var found = false;
+        for (parsed.value.docs) |doc| {
+            if (!std.mem.eql(u8, doc.path, doc_path)) continue;
+            found = true;
+            try std.testing.expectEqual(targets.len, doc.links.len);
+            for (targets, doc.links, 0..) |expected, link, i| {
+                try std.testing.expectEqualStrings(expected, link.target);
+                try std.testing.expectEqual(@as(u32, @intCast(i + 3)), link.line);
+                try std.testing.expectEqualStrings(if (i == 2) "broken" else "ok", link.result);
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "lint --format json works as alias" {
     const allocator = std.testing.allocator;
     var repo = try helpers.TempRepo.init(allocator);

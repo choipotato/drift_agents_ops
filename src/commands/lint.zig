@@ -636,12 +636,47 @@ fn classifyLinkTask(
     slot.* = .{
         .display_target = relative,
         .wire = .{
-            .target = link.target,
+            // Markdown targets borrow FileCache bytes, which expire before rendering.
+            .target = run_arena.dupe(u8, link.target) catch return,
             .line = link.line,
             .result = linkResultStr(if (exists) .ok else .broken),
             .reason = if (exists) null else driftReason(.link_target_not_found),
         },
     };
+}
+
+test "JSON link target survives source buffer overwrite" {
+    const allocator = std.testing.allocator;
+    var run_arena = std.heap.ArenaAllocator.init(allocator);
+    defer run_arena.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(root_path);
+
+    const expected = "missing.md#Details";
+    const source_target = try allocator.dupe(u8, expected);
+    defer allocator.free(source_target);
+    var slot: ?JsonLinkRow = null;
+    classifyLinkTask(std.testing.io, run_arena.allocator(), root_path, root_path, .{
+        .target = source_target,
+        .line = 3,
+    }, &slot);
+    const row = slot orelse return error.TestUnexpectedResult;
+
+    // Deterministically model invalidated FileCache bytes without reading freed memory.
+    @memset(source_target, 'x');
+    try std.testing.expectEqualStrings(expected, row.wire.target);
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try std.json.Stringify.value(row.wire, .{}, &output.writer);
+    const parsed = try std.json.parseFromSlice(drift_check_v1.Link, allocator, output.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(expected, parsed.value.target);
+    try std.testing.expectEqual(@as(u32, 3), parsed.value.line);
+    try std.testing.expectEqualStrings("broken", parsed.value.result);
 }
 
 fn hasUriScheme(target_text: []const u8) bool {
